@@ -48,6 +48,97 @@ API_KEY     = os.getenv("ROLLER_API_KEY", "")  # only if AUTH_TYPE=key
 # Local in-memory token cache
 _token_cache = {"token": None, "exp": 0}
 
+# ---- CATALOG HELPERS ---------------------------------------------------------
+import time, difflib
+
+PRODUCTS_PATH = os.getenv("ROLLER_PRODUCTS_PATH", "/api/v1/products")
+CATALOG_TTL = int(os.getenv("CATALOG_TTL_SECONDS", "600"))
+CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
+
+_catalog_cache = {"at": 0.0, "items": []}
+
+def _fetch_catalog_from_roller():
+    url = f"{ROLLER_BASE}{PRODUCTS_PATH}"
+    r = requests.get(url, headers=_headers(), timeout=15)
+    if r.status_code != 200:
+        raise HTTPException(502, f"Catalog fetch failed: {r.text}")
+    data = r.json()
+
+    # Normalize to a simple shape. Adjust keys to match your tenant’s fields.
+    items = []
+    for p in (data if isinstance(data, list) else data.get("items", [])):
+        # Common field names used by many tenants; change if yours differ:
+        pid = p.get("id") or p.get("productId") or p.get("code")
+        name = p.get("name") or p.get("title")
+        duration = p.get("durationMinutes") or p.get("duration") or 120
+        res_types = p.get("resourceTypes") or p.get("resourceType") or []
+        if isinstance(res_types, str):
+            res_types = [res_types]
+
+        if not pid or not name:
+            continue
+        if CATALOG_NAME_FILTER and CATALOG_NAME_FILTER not in name.lower():
+            # Optional name filter (e.g., only show “party” items)
+            continue
+
+        items.append({
+            "productId": pid,
+            "name": name,
+            "durationMinutes": duration,
+            "resourceTypes": res_types
+        })
+    return items
+
+def _get_catalog():
+    now = time.time()
+    if _catalog_cache["items"] and now - _catalog_cache["at"] < CATALOG_TTL:
+        return _catalog_cache["items"]
+    items = _fetch_catalog_from_roller()
+    _catalog_cache["items"] = items
+    _catalog_cache["at"] = now
+    return items
+
+def _norm(s: str) -> str:
+    return "".join(ch.lower() for ch in (s or "") if ch.isalnum() or ch.isspace()).strip()
+
+# ---- CATALOG ENDPOINTS -------------------------------------------------------
+
+@app.get("/catalog")
+def list_catalog(x_api_key: Optional[str] = Header(default=None, convert_underscores=False)):
+    _require_mw_key(x_api_key)
+    items = _get_catalog()
+    # sort by name for a nicer list
+    items = sorted(items, key=lambda x: x["name"].lower())
+    return {"items": items, "count": len(items)}
+
+@app.get("/resolve-package")
+def resolve_package(q: str, x_api_key: Optional[str] = Header(default=None, convert_underscores=False)):
+    _require_mw_key(x_api_key)
+    text = _norm(q)
+    items = _get_catalog()
+    if not text or not items:
+        return {"matched": False, "choices": items[:10]}  # show first 10 as a hint
+
+    candidates = []
+    for item in items:
+        score = difflib.SequenceMatcher(None, text, _norm(item["name"])).ratio()
+        candidates.append((score, item))
+    score, best = max(candidates, key=lambda t: t[0]) if candidates else (0, None)
+
+    if not best or score < 0.62:
+        # Not confident—return top options so the bot can present buttons
+        choices = [{"productId": it["productId"], "name": it["name"]} for it in items[:10]]
+        return {"matched": False, "choices": choices, "confidence": round(score, 3)}
+
+    return {
+        "matched": True,
+        "confidence": round(score, 3),
+        "productId": best["productId"],
+        "name": best["name"],
+        "resourceTypes": best.get("resourceTypes", []),
+        "durationMinutes": best.get("durationMinutes", 120)
+    }
+
 # ---- UTILITIES ----
 
 def _require_mw_key(x_api_key: Optional[str]):
