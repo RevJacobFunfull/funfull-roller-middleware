@@ -104,7 +104,7 @@ def _norm(s: str) -> str:
 # ---- CATALOG ENDPOINTS -------------------------------------------------------
 
 @app.get("/catalog")
-def list_catalog(x_api_key: Optional[str] = Header(default=None, convert_underscores=False)):
+def list_catalog(x_api_key: Optional[str] = Header(default=None)):
     _require_mw_key(x_api_key)
     items = _get_catalog()
     # sort by name for a nicer list
@@ -112,7 +112,7 @@ def list_catalog(x_api_key: Optional[str] = Header(default=None, convert_undersc
     return {"items": items, "count": len(items)}
 
 @app.get("/resolve-package")
-def resolve_package(q: str, x_api_key: Optional[str] = Header(default=None, convert_underscores=False)):
+def resolve_package(q: str, x_api_key: Optional[str] = Header(default=None)):
     _require_mw_key(x_api_key)
     text = _norm(q)
     items = _get_catalog()
@@ -227,7 +227,7 @@ def availability(
     duration: int = 120,
     resourceType: str = "room",
     quantity: int = 1,
-    x_api_key: Optional[str] = Header(default=None, convert_underscores=False),
+    x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
     # This route demonstrates the Validate-and-Reserve flow
@@ -255,7 +255,7 @@ def availability(
 @app.post("/bookings")
 def create_booking(
     b: BookingIn,
-    x_api_key: Optional[str] = Header(default=None, convert_underscores=False),
+    x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
     url = f"{ROLLER_BASE}/api/v1/bookings"
@@ -277,7 +277,7 @@ class CheckoutIn(BaseModel):
 def checkout(
     booking_id: str,
     body: CheckoutIn,
-    x_api_key: Optional[str] = Header(default=None, convert_underscores=False),
+    x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
     # This path name matches the convention we discussed; confirm in your tenant docs
