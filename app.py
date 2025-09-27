@@ -3,7 +3,7 @@
 Tiny OAuth2 middleware for Intercom → ROLLER (Altitude Huntsville)
 
 Endpoints
-- GET /availability               → proxy to ROLLER validate+reserve OR availability lookup
+- GET /product-availability               → proxy to ROLLER validate+reserve OR availability lookup
 - POST /bookings                  → create booking with details & reserve token
 - POST /bookings/{id}/checkout   → (optional) progressive/online checkout session creator
 - GET /healthz                    → health probe
@@ -38,7 +38,7 @@ app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Funfull Roller middleware is running", "routes": ["/healthz","/catalog","/availability","/bookings"]}
+    return {"status": "ok", "message": "Funfull Roller middleware is running", "routes": ["/healthz","/catalog","/product-availability","/bookings"]}
 
 
 # ---- CONFIG ----
