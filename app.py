@@ -36,6 +36,11 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Funfull Roller middleware is running", "routes": ["/healthz","/catalog","/availability","/bookings"]}
+
+
 # ---- CONFIG ----
 MW_API_KEY = os.getenv("MW_API_KEY", "")  # shared secret expected in X-API-Key from Intercom
 ROLLER_BASE = os.getenv("ROLLER_BASE_URL", "").rstrip("/")
