@@ -318,6 +318,49 @@ def checkout(
         raise HTTPException(502, r.text)
     return r.json()
 
+@app.get("/debug/oauth")
+def debug_oauth(x_api_key: Optional[str] = Header(default=None)):
+    _require_mw_key(x_api_key)
+    form = {
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SEC,
+    }
+    scope = os.getenv("ROLLER_OAUTH_SCOPE")
+    audience = os.getenv("ROLLER_OAUTH_AUDIENCE")
+    if scope: form["scope"] = scope
+    if audience: form["audience"] = audience
+
+    try:
+        r = requests.post(
+            TOKEN_URL,
+            data=form,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            timeout=20,
+        )
+        if r.status_code in (400, 401, 415):
+            from requests.auth import HTTPBasicAuth
+            r = requests.post(
+                TOKEN_URL,
+                data={k: v for k, v in form.items() if k not in ("client_id","client_secret")},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC),
+                timeout=20,
+            )
+        return {
+            "status_code": r.status_code,
+            "text": (r.text or "")[:600],
+        }
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Auth network error: {e}")
+
+
 # (Optional) Webhook receivers for ROLLER payments/booking updates
 @app.post("/webhooks/roller")
 async def roller_webhook(request: Request):
