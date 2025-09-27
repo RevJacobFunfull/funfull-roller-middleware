@@ -161,37 +161,31 @@ def _bearer() -> Optional[str]:
     if not (TOKEN_URL and CLIENT_ID and CLIENT_SEC):
         raise HTTPException(500, "OAuth configured but TOKEN_URL/CLIENT_ID/CLIENT_SECRET missing")
 
-    form = {
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SEC,
-    }
-    # Optional extras via env if your tenant needs them
+    style = os.getenv("ROLLER_TOKEN_STYLE", "basic").lower()  # basic | body
     scope = os.getenv("ROLLER_OAUTH_SCOPE")
     audience = os.getenv("ROLLER_OAUTH_AUDIENCE")
-    if scope: form["scope"] = scope
-    if audience: form["audience"] = audience
 
-    try:
-        # Primary: explicit x-www-form-urlencoded
-        r = requests.post(
-            TOKEN_URL,
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=20,
-        )
-        # Fallback: some providers require HTTP Basic auth instead of putting the secret in the body
+    form = {"grant_type": "client_credentials"}
+    if style == "body":
+        form["client_id"] = CLIENT_ID
+        form["client_secret"] = CLIENT_SEC
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        r = requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
+    else:
+        # default to HTTP Basic Auth
+        from requests.auth import HTTPBasicAuth
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        r = requests.post(TOKEN_URL, data=form, headers=headers, auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC), timeout=20)
+
+        # if server rejects Basic, try body as a fallback
         if r.status_code in (400, 401, 415):
-            from requests.auth import HTTPBasicAuth
-            r = requests.post(
-                TOKEN_URL,
-                data={k: v for k, v in form.items() if k not in ("client_id", "client_secret")},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC),
-                timeout=20,
-            )
-    except requests.RequestException as e:
-        raise HTTPException(502, f"Auth network error: {e}")
+            form["client_id"] = CLIENT_ID
+            form["client_secret"] = CLIENT_SEC
+            r = requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
 
     if r.status_code != 200:
         raise HTTPException(502, f"Auth failed: {r.text}")
