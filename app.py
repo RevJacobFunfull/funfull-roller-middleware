@@ -28,11 +28,18 @@ Run locally
 from __future__ import annotations
 import os, time
 from typing import Optional, List
+from functools import lru_cache
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+
+
+AVAILABILITY_PATH = os.getenv("ROLLER_AVAILABILITY_PATH", "/product-availability")
+AVAIL_TTL = int(os.getenv("AVAILABILITY_TTL_SECONDS", "300"))  # 5 min
+
 
 app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
 
@@ -56,7 +63,7 @@ _token_cache = {"token": None, "exp": 0}
 # ---- CATALOG HELPERS ---------------------------------------------------------
 import time, difflib
 
-PRODUCTS_PATH = os.getenv("ROLLER_PRODUCTS_PATH", "/api/v1/products")
+PRODUCTS_PATH = os.getenv("ROLLER_PRODUCTS_PATH", "/products")
 CATALOG_TTL = int(os.getenv("CATALOG_TTL_SECONDS", "600"))
 CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
 
@@ -69,30 +76,24 @@ def _fetch_catalog_from_roller():
         raise HTTPException(502, f"Catalog fetch failed: {r.text}")
     data = r.json()
 
-    # Normalize to a simple shape. Adjust keys to match your tenant’s fields.
     items = []
     for p in (data if isinstance(data, list) else data.get("items", [])):
-        # Common field names used by many tenants; change if yours differ:
         pid = p.get("id") or p.get("productId") or p.get("code")
         name = p.get("name") or p.get("title")
         duration = p.get("durationMinutes") or p.get("duration") or 120
+        pid = p.get("parentProductId") or p.get("id") or p.get("productId") or p.get("code")
+        name = p.get("parentProductName") or p.get("name") or p.get("title")
+        duration = p.get("duration") or p.get("durationMinutes") or 120
         res_types = p.get("resourceTypes") or p.get("resourceType") or []
         if isinstance(res_types, str):
             res_types = [res_types]
-
         if not pid or not name:
             continue
         if CATALOG_NAME_FILTER and CATALOG_NAME_FILTER not in name.lower():
-            # Optional name filter (e.g., only show “party” items)
             continue
-
-        items.append({
-            "productId": pid,
-            "name": name,
-            "durationMinutes": duration,
-            "resourceTypes": res_types
-        })
+        items.append({"productId": pid, "name": name, "durationMinutes": duration, "resourceTypes": res_types})
     return items
+
 
 def _get_catalog():
     now = time.time()
@@ -161,31 +162,58 @@ def _bearer() -> Optional[str]:
     if not (TOKEN_URL and CLIENT_ID and CLIENT_SEC):
         raise HTTPException(500, "OAuth configured but TOKEN_URL/CLIENT_ID/CLIENT_SECRET missing")
 
-    style = os.getenv("ROLLER_TOKEN_STYLE", "basic").lower()  # basic | body
+    style = os.getenv("ROLLER_TOKEN_STYLE", "basic").lower()  # basic | body | json
     scope = os.getenv("ROLLER_OAUTH_SCOPE")
     audience = os.getenv("ROLLER_OAUTH_AUDIENCE")
 
-    form = {"grant_type": "client_credentials"}
-    if style == "body":
-        form["client_id"] = CLIENT_ID
-        form["client_secret"] = CLIENT_SEC
-        if scope: form["scope"] = scope
-        if audience: form["audience"] = audience
-        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
-        r = requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
-    else:
-        # default to HTTP Basic Auth
-        from requests.auth import HTTPBasicAuth
-        if scope: form["scope"] = scope
-        if audience: form["audience"] = audience
-        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
-        r = requests.post(TOKEN_URL, data=form, headers=headers, auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC), timeout=20)
+    def _ok(resp): return resp.status_code == 200
 
-        # if server rejects Basic, try body as a fallback
-        if r.status_code in (400, 401, 415):
-            form["client_id"] = CLIENT_ID
-            form["client_secret"] = CLIENT_SEC
-            r = requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
+    # ----- try requested style first
+    if style == "json":
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SEC}
+        if scope: payload["scope"] = scope
+        if audience: payload["audience"] = audience
+        r = requests.post(TOKEN_URL, json=payload, headers=headers, timeout=20)
+        if not _ok(r):
+            # fall back to 'body', then 'basic'
+            headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+            form = {"grant_type": "client_credentials"}
+            if scope: form["scope"] = scope
+            if audience: form["audience"] = audience
+            r = requests.post(TOKEN_URL, data={**form, "client_id": CLIENT_ID, "client_secret": CLIENT_SEC}, headers=headers, timeout=20)
+            if not _ok(r):
+                from requests.auth import HTTPBasicAuth
+                r = requests.post(TOKEN_URL, data=form, headers=headers, auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC), timeout=20)
+
+    elif style == "body":
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        form = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SEC}
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        r = requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
+        if not _ok(r):
+            # fall back to json
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SEC}
+            if scope: payload["scope"] = scope
+            if audience: payload["audience"] = audience
+            r = requests.post(TOKEN_URL, json=payload, headers=headers, timeout=20)
+
+    else:  # basic
+        from requests.auth import HTTPBasicAuth
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        form = {"grant_type": "client_credentials"}
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        r = requests.post(TOKEN_URL, data=form, headers=headers, auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC), timeout=20)
+        if not _ok(r):
+            # fall back to json
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SEC}
+            if scope: payload["scope"] = scope
+            if audience: payload["audience"] = audience
+            r = requests.post(TOKEN_URL, json=payload, headers=headers, timeout=20)
 
     if r.status_code != 200:
         raise HTTPException(502, f"Auth failed: {r.text}")
@@ -197,15 +225,20 @@ def _bearer() -> Optional[str]:
 
 
 
-def _headers():
-    h = {"Content-Type": "application/json"}
+
+def _headers(content_type: Optional[str] = None):
+    # Default: don't force a Content-Type on GETs
+    h = {"Accept": "application/json"}
     if AUTH_TYPE == "key":
         if not API_KEY:
             raise HTTPException(500, "ROLLER_API_KEY missing for key auth")
         h["x-api-key"] = API_KEY
     else:
         h["Authorization"] = f"Bearer {_bearer()}"
+    if content_type:
+        h["Content-Type"] = content_type
     return h
+
 
 # ---- MODELS ----
 class AddOn(BaseModel):
@@ -253,7 +286,7 @@ def availability(
 ):
     _require_mw_key(x_api_key)
     # This route demonstrates the Validate-and-Reserve flow
-    url = f"{ROLLER_BASE}/api/v1/capacity/product-availability"
+    url = f"{ROLLER_BASE}/api/v1/capacity/validate-and-reserve"
     payload = {
         "productId": productId,
         "date": date,
@@ -273,6 +306,39 @@ def availability(
     slots = data.get("slots") or []
     data["nearest"] = slots[:2]
     return data
+
+
+
+
+@lru_cache(maxsize=256)
+def _availability_cached(date: str, product_category: Optional[str], product_ids: Optional[str], bucket: int):
+    url = f"{ROLLER_BASE}{AVAILABILITY_PATH}"
+    params = {"Date": date}
+    if product_category:
+        params["ProductCategory"] = product_category
+    if product_ids:
+        params["ProductIds"] = product_ids
+    r = requests.get(url, headers=_headers(), params=params, timeout=15)
+    if r.status_code != 200:
+        raise HTTPException(502, f"Availability fetch failed: {r.text}")
+    return r.json()
+
+def _availability_fetch(date: str, product_category: Optional[str], product_ids: Optional[str]):
+    bucket = int(time.time() // AVAIL_TTL)  # TTL-based cache bucket
+    return _availability_cached(date, product_category, product_ids, bucket)
+
+@app.get("/product-availability")
+def product_availability(
+    Date: str,  # yyyy-MM-dd (case-sensitive to match upstream)
+    ProductCategory: Optional[str] = None,
+    ProductIds: Optional[str] = None,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    _require_mw_key(x_api_key)
+    if len(Date) != 10 or Date[4] != "-" or Date[7] != "-":
+        raise HTTPException(422, "Date must be yyyy-MM-dd")
+    return _availability_fetch(Date, ProductCategory, ProductIds)
+
 
 @app.post("/bookings")
 def create_booking(
@@ -315,44 +381,43 @@ def checkout(
 @app.get("/debug/oauth")
 def debug_oauth(x_api_key: Optional[str] = Header(default=None)):
     _require_mw_key(x_api_key)
-    form = {
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SEC,
-    }
     scope = os.getenv("ROLLER_OAUTH_SCOPE")
     audience = os.getenv("ROLLER_OAUTH_AUDIENCE")
-    if scope: form["scope"] = scope
-    if audience: form["audience"] = audience
 
-    try:
-        r = requests.post(
-            TOKEN_URL,
-            data=form,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
-            timeout=20,
-        )
-        if r.status_code in (400, 401, 415):
-            from requests.auth import HTTPBasicAuth
-            r = requests.post(
-                TOKEN_URL,
-                data={k: v for k, v in form.items() if k not in ("client_id","client_secret")},
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                },
-                auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC),
-                timeout=20,
-            )
-        return {
-            "status_code": r.status_code,
-            "text": (r.text or "")[:600],
-        }
-    except requests.RequestException as e:
-        raise HTTPException(502, f"Auth network error: {e}")
+    def post_json():
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        body = {"grant_type":"client_credentials","client_id":CLIENT_ID,"client_secret":CLIENT_SEC}
+        if scope: body["scope"] = scope
+        if audience: body["audience"] = audience
+        return requests.post(TOKEN_URL, json=body, headers=headers, timeout=20)
+
+    def post_body():
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        form = {"grant_type":"client_credentials","client_id":CLIENT_ID,"client_secret":CLIENT_SEC}
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        return requests.post(TOKEN_URL, data=form, headers=headers, timeout=20)
+
+    def post_basic():
+        from requests.auth import HTTPBasicAuth
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        form = {"grant_type":"client_credentials"}
+        if scope: form["scope"] = scope
+        if audience: form["audience"] = audience
+        return requests.post(TOKEN_URL, data=form, headers=headers, auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SEC), timeout=20)
+
+    for fn in (post_json, post_body, post_basic):
+        try:
+            r = fn()
+            if r.status_code == 200:
+                return {"status_code": r.status_code, "text": (r.text or "")[:600]}
+            if r.status_code in (400, 401, 415):
+                continue
+            break
+        except requests.RequestException as e:
+            last_err = str(e)
+            continue
+    return {"status_code": getattr(r, "status_code", 0), "text": (getattr(r, "text", last_err) or "")[:600]}
 
 
 # (Optional) Webhook receivers for ROLLER payments/booking updates
