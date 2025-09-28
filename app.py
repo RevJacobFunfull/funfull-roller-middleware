@@ -77,15 +77,8 @@ CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
 
 # ---- PATHS ----
 AVAILABILITY_PATH = os.getenv("ROLLER_AVAILABILITY_PATH", "/product-availability")
-
-# Try explicit override, then public host path, then tenant host path
-_CAPACITY_PATHS = [
-    os.getenv("ROLLER_CAPACITY_PATH"),
-    "/product-availability/validate-and-reserve",  # <-- add this
-    "/capacity/validate-and-reserve",
-    "/api/v1/capacity/validate-and-reserve",
-]
-_CAPACITY_PATHS = [p for p in _CAPACITY_PATHS if p]
+# Single capacity endpoint (public host path)
+CAPACITY_PATH = os.getenv("ROLLER_CAPACITY_PATH", "/product-availability/validate-and-reserve")
 
 
 
@@ -305,12 +298,15 @@ def healthz():
     return {"ok": True}
 
 
+# Single capacity endpoint (public host path)
+CAPACITY_PATH = os.getenv("ROLLER_CAPACITY_PATH", "/product-availability/validate-and-reserve")
+
 @app.get("/availability")
 def availability(
     productId: str,
     date: str,                      # YYYY-MM-DD
     duration: int = 120,
-    resourceType: Optional[str] = None,   # make optional; some tenants don’t need it
+    resourceType: Optional[str] = None,   # optional; some tenants don’t need it
     quantity: int = 1,
     startTime: Optional[str] = Query(None),   # HH:mm
     x_api_key: Optional[str] = Header(default=None),
@@ -335,33 +331,35 @@ def availability(
     if startTime:
         payload["startTime"] = startTime
 
-    last = None
-    for path in _CAPACITY_PATHS:
-        url = f"{ROLLER_BASE}{path}"
-        try:
-            r = requests.post(url, headers=_headers("application/json"), json=payload, timeout=15)
-        except requests.RequestException as e:
-            last = e
-            continue
-        if r.status_code == 200:
-            data = r.json()
-            slots = data.get("slots") or []
-            data["nearest"] = slots[:2]
-            return data
-        # keep trying next path on 404/405
-        if r.status_code in (404, 405):
-            last = r
-            continue
-        # other upstream errors: bubble up immediately
-        raise HTTPException(502, detail={"upstream_status": r.status_code, "upstream_body": (r.text or "")[:600], "path": path})
+    url = f"{ROLLER_BASE}{CAPACITY_PATH}"
+    try:
+        r = requests.post(url, headers=_headers("application/json"), json=payload, timeout=15)
+    except requests.RequestException as e:
+        raise HTTPException(502, f"ROLLER network error: {e}")
 
-    # if we exhausted paths
-    if isinstance(last, requests.RequestException):
-        raise HTTPException(502, f"ROLLER network error: {last}")
-    else:
-        raise HTTPException(502, detail={"error": "All capacity paths failed", "tried": _CAPACITY_PATHS,
-                                         "last_status": getattr(last, "status_code", None),
-                                         "last_body": (getattr(last, "text", "") or "")[:600]})
+    if r.status_code == 404:
+        # Helpful hint when the path is wrong for the tenant
+        raise HTTPException(
+            502,
+            detail={
+                "upstream_status": 404,
+                "url": url,
+                "hint": "Capacity endpoint path is wrong for this tenant. Try setting ROLLER_CAPACITY_PATH to '/api/v1/capacity/validate-and-reserve' (tenant host) or '/capacity/validate-and-reserve'.",
+                "upstream_body": (r.text or "")[:600],
+            },
+        )
+
+    if r.status_code != 200:
+        raise HTTPException(
+            502,
+            detail={"upstream_status": r.status_code, "upstream_body": (r.text or "")[:600], "url": url},
+        )
+
+    data = r.json()
+    slots = data.get("slots") or []
+    data["nearest"] = slots[:2]
+    return data
+
 
 
 
