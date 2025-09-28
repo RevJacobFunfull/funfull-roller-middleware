@@ -27,9 +27,11 @@ Run locally
 """
 
 
+from __future__ import annotations
+
+
 import os, time
 import requests
-from __future__ import annotations
 from typing import Optional, List
 from functools import lru_cache
 from datetime import datetime
