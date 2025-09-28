@@ -299,7 +299,7 @@ def availability(
 
     # Reserve mode (needs startTime)
     if startTime:
-        url = f"{ROLLER_BASE}/capacity/validate-and-reserve"  # << no /api/v1
+        f"{ROLLER_BASE}/api/v1/capacity/validate-and-reserve"  # << no /api/v1
         payload = {
             "productId": productId,       # variation id (e.g. 916287)
             "date": date,                 # yyyy-MM-dd
