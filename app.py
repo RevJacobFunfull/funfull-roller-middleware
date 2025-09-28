@@ -25,12 +25,14 @@ Run locally
   pip install fastapi uvicorn[standard] pydantic requests python-dotenv
   uvicorn app:app --host 0.0.0.0 --port 8080 --reload
 """
-from __future__ import annotations
+
+
 import os, time
+import requests
+from __future__ import annotations
 from typing import Optional, List
 from functools import lru_cache
-
-import requests
+from datetime import datetime
 from fastapi import FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -42,6 +44,11 @@ AVAIL_TTL = int(os.getenv("AVAILABILITY_TTL_SECONDS", "300"))  # 5 min
 
 
 app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
+
+def _to_minutes(hhmm: str) -> int:
+    # "13:30" -> 810
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
 @app.get("/")
 def root():
@@ -332,18 +339,49 @@ def _availability_fetch(date: str, product_category: Optional[str], product_ids:
 @app.get("/product-availability")
 def product_availability(
     Date: Optional[str] = Query(None),
-    date: Optional[str] = Query(None),
+    date: Optional[str] = Query(None),   # accept lowercase too
     ProductCategory: Optional[str] = None,
     ProductIds: Optional[str] = None,
+    preferredTime: Optional[str] = Query(None, regex=r"^\d{2}:\d{2}$"),
     x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
+
+    # normalize Date
     Date = Date or date
-    if not Date:
-        raise HTTPException(422, "Date must be provided as yyyy-MM-dd")
-    if len(Date) != 10 or Date[4] != "-" or Date[7] != "-":
+    if not Date or len(Date) != 10 or Date[4] != "-" or Date[7] != "-":
         raise HTTPException(422, "Date must be yyyy-MM-dd")
-    return _availability_fetch(Date, ProductCategory, ProductIds)
+
+    # fetch from ROLLER
+    data = _availability_fetch(Date, ProductCategory, ProductIds)
+
+    # If caller provided a preferred time, compute adjacent sessions per product
+    if preferredTime:
+        pt = _to_minutes(preferredTime)
+        for prod in data:
+            sessions = prod.get("sessions") or []
+            if not sessions:
+                continue
+            # sort by startTime just in case
+            sessions.sort(key=lambda s: _to_minutes(s["startTime"]))
+            starts = [_to_minutes(s["startTime"]) for s in sessions]
+
+            # find nearest index
+            idx = min(range(len(starts)), key=lambda i: abs(starts[i] - pt))
+
+            # pick the chosen and up to two neighbors (one before, one after)
+            neighbors = []
+            if idx - 1 >= 0:
+                neighbors.append(sessions[idx - 1])
+            neighbors.append(sessions[idx])
+            if idx + 1 < len(sessions):
+                neighbors.append(sessions[idx + 1])
+
+            # attach convenience field
+            prod["preferred"] = preferredTime
+            prod["neighborSessions"] = neighbors
+
+    return data
 
 
 @app.post("/bookings")
