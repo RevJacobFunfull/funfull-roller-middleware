@@ -49,7 +49,11 @@ app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Funfull Roller middleware is running", "routes": ["/healthz","/catalog","/product-","/bookings"]}
+    return {
+        "status": "ok",
+        "message": "Funfull Roller middleware is running",
+        "routes": ["/healthz", "/catalog", "/product-availability", "/availability", "/bookings"]
+    }
 
 
 # ---- CONFIG ----
@@ -70,6 +74,19 @@ import time, difflib
 PRODUCTS_PATH = os.getenv("ROLLER_PRODUCTS_PATH", "/products")
 CATALOG_TTL = int(os.getenv("CATALOG_TTL_SECONDS", "600"))
 CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
+
+# ---- PATHS ----
+AVAILABILITY_PATH = os.getenv("ROLLER_AVAILABILITY_PATH", "/product-availability")
+
+# Try an explicit override first (if you ever set it),
+# then the public-host path (no /api/v1), then tenant-host path.
+_CAPACITY_PATHS = [
+    os.getenv("ROLLER_CAPACITY_PATH"),
+    "/capacity/validate-and-reserve",
+    "/api/v1/capacity/validate-and-reserve",
+]
+_CAPACITY_PATHS = [p for p in _CAPACITY_PATHS if p]  # strip Nones
+
 
 _catalog_cache = {"at": 0.0, "items": []}
 
@@ -292,45 +309,59 @@ def availability(
     productId: str,
     date: str,                      # YYYY-MM-DD
     duration: int = 120,
-    resourceType: str = "room",
+    resourceType: Optional[str] = None,   # make optional; some tenants don’t need it
     quantity: int = 1,
-    startTime: Optional[str] = Query(None),   # <-- NEW
+    startTime: Optional[str] = Query(None),   # HH:mm
     x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
 
-    # validate input
+    # basic validation
     if len(date) != 10 or date[4] != "-" or date[7] != "-":
         raise HTTPException(422, "date must be YYYY-MM-DD")
     if startTime and (len(startTime) != 5 or startTime[2] != ":"):
         raise HTTPException(422, "startTime must be HH:mm")
 
-    url = f"{ROLLER_BASE}/api/v1/capacity/validate-and-reserve"
     payload = {
         "productId": productId,
         "date": date,
         "durationMinutes": duration,
-        "resourceType": resourceType,
         "quantity": quantity,
         "hold": {"ttlSeconds": 900},
     }
-    if startTime:                       # <-- include it when provided
+    if resourceType:
+        payload["resourceType"] = resourceType
+    if startTime:
         payload["startTime"] = startTime
 
-    try:
-        r = requests.post(url, headers=_headers("application/json"), json=payload, timeout=15)
-    except requests.RequestException as e:
-        raise HTTPException(502, f"ROLLER error: {e}")
+    last = None
+    for path in _CAPACITY_PATHS:
+        url = f"{ROLLER_BASE}{path}"
+        try:
+            r = requests.post(url, headers=_headers("application/json"), json=payload, timeout=15)
+        except requests.RequestException as e:
+            last = e
+            continue
+        if r.status_code == 200:
+            data = r.json()
+            slots = data.get("slots") or []
+            data["nearest"] = slots[:2]
+            return data
+        # keep trying next path on 404/405
+        if r.status_code in (404, 405):
+            last = r
+            continue
+        # other upstream errors: bubble up immediately
+        raise HTTPException(502, detail={"upstream_status": r.status_code, "upstream_body": (r.text or "")[:600], "path": path})
 
-    if r.status_code != 200:
-        # helpful pass-through for Intercom logs
-        raise HTTPException(502, detail={"upstream_status": r.status_code, "upstream_body": r.text[:600]})
+    # if we exhausted paths
+    if isinstance(last, requests.RequestException):
+        raise HTTPException(502, f"ROLLER network error: {last}")
+    else:
+        raise HTTPException(502, detail={"error": "All capacity paths failed", "tried": _CAPACITY_PATHS,
+                                         "last_status": getattr(last, "status_code", None),
+                                         "last_body": (getattr(last, "text", "") or "")[:600]})
 
-    data = r.json()
-    # convenient neighbors if ROLLER returned the day’s slots
-    slots = data.get("slots") or []
-    data["nearest"] = slots[:2]
-    return data
 
 
 
