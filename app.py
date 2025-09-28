@@ -47,11 +47,6 @@ AVAIL_TTL = int(os.getenv("AVAILABILITY_TTL_SECONDS", "300"))  # 5 min
 
 app = FastAPI(title="Funfull ROLLER Middleware", version="1.0.0")
 
-def _to_minutes(hhmm: str) -> int:
-    # "13:30" -> 810
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
-
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Funfull Roller middleware is running", "routes": ["/healthz","/catalog","/product-availability","/bookings"]}
@@ -163,6 +158,11 @@ def _require_mw_key(x_api_key: Optional[str]):
         return
     if x_api_key != MW_API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized: bad X-API-Key")
+
+def _to_minutes(hhmm: str) -> int:
+    # "13:30" -> 810
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
 def _bearer() -> Optional[str]:
     if AUTH_TYPE == "key":
@@ -286,37 +286,43 @@ class BookingIn(BaseModel):
 def healthz():
     return {"ok": True}
 
+
 @app.get("/availability")
 def availability(
     productId: str,
-    date: str,  # YYYY-MM-DD
-    duration: int = 120,
-    resourceType: str = "room",
+    date: str,                      # YYYY-MM-DD
+    startTime: Optional[str] = None,# HH:mm (venue local)
     quantity: int = 1,
     x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
-    # This route demonstrates the Validate-and-Reserve flow
-    url = f"{ROLLER_BASE}/api/v1/capacity/validate-and-reserve"
-    payload = {
-        "productId": productId,
-        "date": date,
-        "durationMinutes": duration,
-        "resourceType": resourceType,
-        "quantity": quantity,
-        "hold": {"ttlSeconds": 900},  # 15-min soft hold while caller decides
-    }
-    try:
-        r = requests.post(url, headers=_headers(), json=payload, timeout=12)
-    except requests.RequestException as e:
-        raise HTTPException(502, f"ROLLER error: {e}")
-    if r.status_code != 200:
-        raise HTTPException(502, r.text)
-    data = r.json()
-    # Optional convenience: compute two nearest alternative times if not available
-    slots = data.get("slots") or []
-    data["nearest"] = slots[:2]
-    return data
+
+    # Reserve mode (needs startTime)
+    if startTime:
+        url = f"{ROLLER_BASE}/capacity/validate-and-reserve"  # << no /api/v1
+        payload = {
+            "productId": productId,       # variation id (e.g. 916287)
+            "date": date,                 # yyyy-MM-dd
+            "startTime": startTime,       # HH:mm (e.g. "11:30")
+            "quantity": quantity,
+            "hold": {"ttlSeconds": 900},  # 15-min soft hold
+            # Optional if your tenant requires:
+            # "venueId": 20734,
+        }
+        try:
+            r = requests.post(url, headers=_headers(content_type="application/json"), json=payload, timeout=15)
+        except requests.RequestException as e:
+            raise HTTPException(502, f"ROLLER network error: {e}")
+        if r.status_code != 200:
+            # show the real upstream issue in logs/Intercom
+            raise HTTPException(502, {"upstream_status": r.status_code, "upstream_body": r.text})
+        return r.json()
+
+    # Discovery mode (no startTime): return sessions + 2 neighbors
+    # If you know the parent product id, pass it via ProductIds filter (parent ids)
+    avail = _availability_fetch(date, None, productId)  # if you pass parent id; see call examples below
+    # pick sessions and compute neighbors here if you want; or just return avail verbatim
+    return avail
 
 
 
