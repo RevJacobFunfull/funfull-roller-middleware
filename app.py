@@ -78,9 +78,6 @@ def _fetch_catalog_from_roller():
 
     items = []
     for p in (data if isinstance(data, list) else data.get("items", [])):
-        pid = p.get("id") or p.get("productId") or p.get("code")
-        name = p.get("name") or p.get("title")
-        duration = p.get("durationMinutes") or p.get("duration") or 120
         pid = p.get("parentProductId") or p.get("id") or p.get("productId") or p.get("code")
         name = p.get("parentProductName") or p.get("name") or p.get("title")
         duration = p.get("duration") or p.get("durationMinutes") or 120
@@ -91,7 +88,12 @@ def _fetch_catalog_from_roller():
             continue
         if CATALOG_NAME_FILTER and CATALOG_NAME_FILTER not in name.lower():
             continue
-        items.append({"productId": pid, "name": name, "durationMinutes": duration, "resourceTypes": res_types})
+        items.append({
+            "productId": pid,
+            "name": name,
+            "durationMinutes": duration,
+            "resourceTypes": res_types
+        })
     return items
 
 
