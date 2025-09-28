@@ -31,7 +31,7 @@ from typing import Optional, List
 from functools import lru_cache
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -331,12 +331,16 @@ def _availability_fetch(date: str, product_category: Optional[str], product_ids:
 
 @app.get("/product-availability")
 def product_availability(
-    Date: str,  # yyyy-MM-dd (case-sensitive to match upstream)
+    Date: Optional[str] = Query(None),
+    date: Optional[str] = Query(None),
     ProductCategory: Optional[str] = None,
     ProductIds: Optional[str] = None,
     x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
+    Date = Date or date
+    if not Date:
+        raise HTTPException(422, "Date must be provided as yyyy-MM-dd")
     if len(Date) != 10 or Date[4] != "-" or Date[7] != "-":
         raise HTTPException(422, "Date must be yyyy-MM-dd")
     return _availability_fetch(Date, ProductCategory, ProductIds)
