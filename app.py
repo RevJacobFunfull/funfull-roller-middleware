@@ -78,14 +78,15 @@ CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
 # ---- PATHS ----
 AVAILABILITY_PATH = os.getenv("ROLLER_AVAILABILITY_PATH", "/product-availability")
 
-# Try an explicit override first (if you ever set it),
-# then the public-host path (no /api/v1), then tenant-host path.
+# Try explicit override, then public host path, then tenant host path
 _CAPACITY_PATHS = [
     os.getenv("ROLLER_CAPACITY_PATH"),
+    "/product-availability/validate-and-reserve",  # <-- add this
     "/capacity/validate-and-reserve",
     "/api/v1/capacity/validate-and-reserve",
 ]
-_CAPACITY_PATHS = [p for p in _CAPACITY_PATHS if p]  # strip Nones
+_CAPACITY_PATHS = [p for p in _CAPACITY_PATHS if p]
+
 
 
 _catalog_cache = {"at": 0.0, "items": []}
