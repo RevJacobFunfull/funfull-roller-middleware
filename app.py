@@ -253,7 +253,7 @@ def availability(
 ):
     _require_mw_key(x_api_key)
     # This route demonstrates the Validate-and-Reserve flow
-    url = f"{ROLLER_BASE}/api/v1/capacity/validate-and-reserve"
+    url = f"{ROLLER_BASE}/api/v1/capacity/product-availability"
     payload = {
         "productId": productId,
         "date": date,
