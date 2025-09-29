@@ -35,7 +35,7 @@ import requests
 from typing import Optional, List
 from functools import lru_cache
 from datetime import datetime
-from fastapi import FastAPI, Header, HTTPException, Request, Query
+from fastapi import FastAPI, Header, Body, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -77,8 +77,8 @@ CATALOG_NAME_FILTER = os.getenv("CATALOG_NAME_FILTER", "").lower()
 
 # ---- PATHS ----
 AVAILABILITY_PATH = os.getenv("ROLLER_AVAILABILITY_PATH", "/product-availability")
-# Single capacity endpoint (public host path)
 CAPACITY_PATH = os.getenv("ROLLER_CAPACITY_PATH", "/product-availability/validate-and-reserve")
+BOOKINGS_PATH     = os.getenv("ROLLER_BOOKINGS_PATH", "/bookings")  # '/bookings' (public host) or '/api/v1/bookings' (tenant host)
 
 
 
@@ -245,6 +245,70 @@ def _bearer() -> Optional[str]:
     _token_cache["exp"] = now + int(data.get("expires_in", 3600))
     return _token_cache["token"]
 
+
+def _internal_to_roller(b: dict) -> dict:
+    """
+    Map our internal BookingIn-ish shape into ROLLER's /bookings payload.
+    """
+    # Required / common fields
+    start_iso = b["start"]                                   # e.g. '2025-11-15T13:30:00-06:00'
+    dt = datetime.fromisoformat(start_iso)
+    booking_date = dt.date().isoformat()                     # '2025-11-15'
+    start_time   = dt.strftime("%H:%M")                      # '13:30'
+
+    product_id = int(b["productId"])
+    quantity   = int(b.get("headcount", 1))
+
+    contact = b.get("contact", {}) or {}
+    first = contact.get("firstName") or "Guest"
+    last  = contact.get("lastName")  or ""
+    email = contact.get("email")     or "noemail@example.com"
+    phone = contact.get("phone")     or ""
+
+    # Map reserve token → capacityReservationId if present
+    capacity_res_id = b.get("reserveToken") or b.get("capacityReservationId")
+
+    # Optional: map addons -> partyPackageInclusions (best-effort)
+    inclusions = []
+    for ad in b.get("addons", []):
+        pid = ad.get("sku")
+        try:
+            pid = int(pid)
+        except Exception:
+            # if sku isn't numeric, skip inclusion
+            pid = None
+        if pid:
+            inclusions.append({"productId": pid, "quantity": int(ad.get("qty", 1))})
+
+    name = b.get("partyLabel") or f"{first} {last}".strip()
+    external_id = b.get("externalId") or f"FF-{int(time.time())}"
+
+    item = {
+        "productId": product_id,
+        "quantity": quantity,
+        "bookingDate": booking_date,
+        "startTime": start_time,
+    }
+    if inclusions:
+        item["partyPackageInclusions"] = inclusions
+
+    out = {
+        "externalId": external_id,
+        "name": name,
+        "comments": b.get("notes") or "",
+        "capacityReservationId": capacity_res_id,    # strongly recommended by ROLLER
+        "customerPaysFees": False,
+        "customer": {
+            "firstName": first,
+            "lastName": last,
+            "email": email,
+            "phone": phone,
+        },
+        "items": [item],
+        "sendConfirmations": False,
+    }
+    # pass through optional pricing or other hints if you later add them
+    return out
 
 
 
@@ -431,18 +495,28 @@ def product_availability(
 
 @app.post("/bookings")
 def create_booking(
-    b: BookingIn,
+    body: dict = Body(...),                 # accept either raw ROLLER or our internal shape
     x_api_key: Optional[str] = Header(default=None),
 ):
     _require_mw_key(x_api_key)
-    url = f"{ROLLER_BASE}/api/v1/bookings"
+
+    # Decide mode: raw (ROLLER) vs internal
+    # Heuristic: raw has 'externalId' + 'items' + 'customer'
+    is_raw = all(k in body for k in ("externalId", "items", "customer"))
+    roller_payload = body if is_raw else _internal_to_roller(body)
+
+    url = f"{ROLLER_BASE}{BOOKINGS_PATH}"
     try:
-        r = requests.post(url, headers=_headers(), json=b.dict(), timeout=20)
+        r = requests.post(url, headers=_headers("application/json"), json=roller_payload, timeout=20)
     except requests.RequestException as e:
         raise HTTPException(502, f"ROLLER error: {e}")
+
+    # ROLLER returns 201 on success; bubble up details on error
     if r.status_code not in (200, 201):
-        raise HTTPException(502, r.text)
+        raise HTTPException(502, detail={"upstream_status": r.status_code, "upstream_body": (r.text or "")[:800], "url": url})
+
     return r.json()
+
 
 class CheckoutIn(BaseModel):
     amount: float
